@@ -241,13 +241,7 @@ func ExampleLog_Append() {
 }
 
 func BenchmarkLog_Append(b *testing.B) {
-	dir, err := ioutil.TempDir("", "*")
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-	defer os.RemoveAll(dir)
-
+	dir := b.TempDir()
 	log, err := Open(dir)
 	if err != nil {
 		fmt.Println(err)
