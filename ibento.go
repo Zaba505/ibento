@@ -8,8 +8,7 @@ package ibento
 
 import (
 	"context"
-	"crypto/sha256"
-	"errors"
+	"encoding/binary"
 	"fmt"
 
 	cloudevent "github.com/cloudevents/sdk-go/binding/format/protobuf/v2"
@@ -23,6 +22,7 @@ import (
 // Log represents an readonly and append-only log of events
 type Log struct {
 	badger *badger.DB
+	seq    *badger.Sequence
 	log    *zap.Logger
 }
 
@@ -58,8 +58,14 @@ func Open(dir string, opts ...Option) (*Log, error) {
 		return nil, err
 	}
 
+	seq, err := db.GetSequence([]byte("event_idx"), 1)
+	if err != nil {
+		return nil, err
+	}
+
 	l := &Log{
 		badger: db,
+		seq:    seq,
 		log:    defaultOpts.logger,
 	}
 	return l, nil
@@ -67,6 +73,7 @@ func Open(dir string, opts ...Option) (*Log, error) {
 
 // Close
 func (l *Log) Close() error {
+	l.seq.Release()
 	return l.badger.Close()
 }
 
@@ -86,6 +93,8 @@ func (e ValidationError) Unwrap() error {
 	return e.Cause
 }
 
+const eventIdxKeyPrefix = "eventidx"
+
 // Append will add the given event to the end of a Log.
 func (l *Log) Append(ctx context.Context, ev event.Event) error {
 	err := ev.Validate()
@@ -96,10 +105,14 @@ func (l *Log) Append(ctx context.Context, ev event.Event) error {
 		}
 	}
 
-	h := sha256.New()
-	h.Write([]byte(ev.Source()))
-	h.Write([]byte(ev.ID()))
-	key := h.Sum(nil)
+	idx, err := l.seq.Next()
+	if err != nil {
+		l.log.Error("failed to allocate new event index in log", zap.Error(err))
+		return err
+	}
+	var key [16]byte
+	copy(key[:8], eventIdxKeyPrefix)
+	binary.BigEndian.PutUint64(key[8:], idx)
 
 	pb, err := cloudevent.ToProto(&ev)
 	if err != nil {
@@ -113,14 +126,7 @@ func (l *Log) Append(ctx context.Context, ev event.Event) error {
 	}
 
 	return l.badger.Update(func(txn *badger.Txn) error {
-		item, err := txn.Get(key)
-		if err != nil && err != badger.ErrKeyNotFound {
-			return err
-		}
-		if item != nil {
-			return errors.New("ibento: event source + event id must be unique")
-		}
-		return txn.Set(key, value)
+		return txn.Set(key[:], value)
 	})
 }
 
@@ -130,6 +136,17 @@ type Iterator struct {
 	iterOpts badger.IteratorOptions
 
 	log *zap.Logger
+}
+
+// Iterator initializes a new iterator over the event log.
+func (l *Log) Iterator() *Iterator {
+	iterOpts := badger.DefaultIteratorOptions
+	iterOpts.Prefix = []byte(eventIdxKeyPrefix)
+	return &Iterator{
+		badger:   l.badger,
+		log:      l.log,
+		iterOpts: iterOpts,
+	}
 }
 
 // Consume
@@ -175,11 +192,4 @@ func (it *Iterator) Consume(f func(*event.Event) error) error {
 		}
 		return nil
 	})
-}
-
-// Iterator initializes a new iterator over the event log.
-func (l *Log) Iterator() *Iterator {
-	return &Iterator{
-		badger: l.badger,
-	}
 }

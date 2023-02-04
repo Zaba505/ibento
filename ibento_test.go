@@ -81,13 +81,78 @@ func ExampleOpen_customOptions() {
 	// Output: opened
 }
 
-func TestLog_Append(t *testing.T) {
-	t.Run("will return an error", func(t *testing.T) {
-		t.Run("if given an invalid cloudevent", func(t *testing.T) {
-			dir, err := ioutil.TempDir("", "*")
+func TestLog(t *testing.T) {
+	t.Run("will not overwrite previously written events", func(t *testing.T) {
+		t.Run("if the log is closed and reopened", func(t *testing.T) {
+			openAndAppend := func(dir string, ev event.Event) error {
+				log, err := Open(dir)
+				if err != nil {
+					return err
+				}
+				defer log.Close()
+
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+
+				return log.Append(ctx, ev)
+			}
+
+			dir := t.TempDir()
+
+			ev := event.New()
+			ev.SetID("1234")
+			ev.SetType("test")
+			ev.SetSource("test1")
+			err := openAndAppend(dir, ev)
 			if !assert.Nil(t, err) {
 				return
 			}
+
+			ev = event.New()
+			ev.SetID("4321")
+			ev.SetType("test")
+			ev.SetSource("test2")
+			err = openAndAppend(dir, ev)
+			if !assert.Nil(t, err) {
+				return
+			}
+
+			eventlog, err := Open(dir)
+			if !assert.Nil(t, err) {
+				return
+			}
+			defer eventlog.Close()
+
+			var events []event.Event
+			numOfEvents := 0
+			err = eventlog.
+				Iterator().
+				Consume(func(e *event.Event) error {
+					numOfEvents += 1
+					events = append(events, *e)
+					return nil
+				})
+			if !assert.Nil(t, err) {
+				return
+			}
+
+			if !assert.Equal(t, 2, numOfEvents) {
+				return
+			}
+			if !assert.Equal(t, events[0].ID(), "1234") {
+				return
+			}
+			if !assert.Equal(t, events[1].ID(), "4321") {
+				return
+			}
+		})
+	})
+}
+
+func TestLog_Append(t *testing.T) {
+	t.Run("will return an error", func(t *testing.T) {
+		t.Run("if given an invalid cloudevent", func(t *testing.T) {
+			dir := t.TempDir()
 
 			log, err := Open(dir)
 			if !assert.Nil(t, err) {
@@ -111,10 +176,7 @@ func TestLog_Append(t *testing.T) {
 		})
 
 		t.Run("if log already been closed", func(t *testing.T) {
-			dir, err := ioutil.TempDir("", "*")
-			if !assert.Nil(t, err) {
-				return
-			}
+			dir := t.TempDir()
 
 			log, err := Open(dir)
 			if !assert.Nil(t, err) {
