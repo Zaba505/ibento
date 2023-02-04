@@ -8,10 +8,11 @@ package ibento
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
-	"strconv"
 
-	eventpb "github.com/cloudevents/sdk-go/binding/format/protobuf/v2"
+	cloudevent "github.com/cloudevents/sdk-go/binding/format/protobuf/v2"
+	eventpb "github.com/cloudevents/sdk-go/binding/format/protobuf/v2/pb"
 	"github.com/cloudevents/sdk-go/v2/event"
 	"github.com/dgraph-io/badger/v3"
 	"go.uber.org/zap"
@@ -50,12 +51,14 @@ func Open(dir string, opts ...Option) (*Log, error) {
 		opt(&defaultOpts)
 	}
 
-	db, err := badger.Open(defaultOpts.bopts)
+	badgerOpts := defaultOpts.bopts
+	badgerOpts.Logger = badgerLogger{zap: defaultOpts.logger.Sugar()}
+	db, err := badger.Open(badgerOpts)
 	if err != nil {
 		return nil, err
 	}
 
-	seq, err := db.GetSequence([]byte("oneri"), ^uint64(0))
+	seq, err := db.GetSequence([]byte("event_idx"), 1)
 	if err != nil {
 		return nil, err
 	}
@@ -90,6 +93,8 @@ func (e ValidationError) Unwrap() error {
 	return e.Cause
 }
 
+const eventIdxKeyPrefix = "eventidx"
+
 // Append will add the given event to the end of a Log.
 func (l *Log) Append(ctx context.Context, ev event.Event) error {
 	err := ev.Validate()
@@ -100,14 +105,16 @@ func (l *Log) Append(ctx context.Context, ev event.Event) error {
 		}
 	}
 
-	i, err := l.seq.Next()
+	idx, err := l.seq.Next()
 	if err != nil {
-		l.log.Error("failed to increment log pointer", zap.Error(err))
+		l.log.Error("failed to allocate new event index in log", zap.Error(err))
 		return err
 	}
-	key := strconv.FormatUint(i, 10)
+	var key [16]byte
+	copy(key[:8], eventIdxKeyPrefix)
+	binary.BigEndian.PutUint64(key[8:], idx)
 
-	pb, err := eventpb.ToProto(&ev)
+	pb, err := cloudevent.ToProto(&ev)
 	if err != nil {
 		l.log.Error("failed to map cloudevent struct to protobuf message", zap.Error(err))
 		return err
@@ -119,6 +126,70 @@ func (l *Log) Append(ctx context.Context, ev event.Event) error {
 	}
 
 	return l.badger.Update(func(txn *badger.Txn) error {
-		return txn.Set([]byte(key), value)
+		return txn.Set(key[:], value)
+	})
+}
+
+// Iterator
+type Iterator struct {
+	badger   *badger.DB
+	iterOpts badger.IteratorOptions
+
+	log *zap.Logger
+}
+
+// Iterator initializes a new iterator over the event log.
+func (l *Log) Iterator() *Iterator {
+	iterOpts := badger.DefaultIteratorOptions
+	iterOpts.Prefix = []byte(eventIdxKeyPrefix)
+	return &Iterator{
+		badger:   l.badger,
+		log:      l.log,
+		iterOpts: iterOpts,
+	}
+}
+
+// Consume
+func (it *Iterator) Consume(f func(*event.Event) error) error {
+	return it.badger.View(func(txn *badger.Txn) error {
+		iter := txn.NewIterator(it.iterOpts)
+		defer iter.Close()
+
+		for iter.Rewind(); iter.Valid(); iter.Next() {
+			var cev eventpb.CloudEvent
+			item := iter.Item()
+			err := item.Value(func(val []byte) error {
+				return cloudevent.DecodeData(context.TODO(), val, &cev)
+			})
+			if err != nil {
+				it.log.Error("failed to unmarshal protobuf cloudevent", zap.Error(err))
+				return err
+			}
+
+			ev, err := cloudevent.FromProto(&cev)
+			if err != nil {
+				it.log.Error(
+					"failed to convert protobuf cloudevent to sdk cloudevent model",
+					zap.String("event_id", cev.Id),
+					zap.String("event_type", cev.Type),
+					zap.String("event_source", cev.Source),
+					zap.Error(err),
+				)
+				return err
+			}
+
+			err = f(ev)
+			if err != nil {
+				it.log.Error(
+					"failed to apply given function to cloudevent",
+					zap.String("event_id", cev.Id),
+					zap.String("event_type", cev.Type),
+					zap.String("event_source", cev.Source),
+					zap.Error(err),
+				)
+				return err
+			}
+		}
+		return nil
 	})
 }
