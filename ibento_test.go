@@ -208,3 +208,54 @@ func BenchmarkLog_Append(b *testing.B) {
 		}
 	}
 }
+
+func ExampleLog_Iterator() {
+	dir, err := ioutil.TempDir("", "*")
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	defer os.RemoveAll(dir)
+
+	eventlog, err := Open(dir)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	defer eventlog.Close() // don't forget to close when done
+
+	ev1 := event.New()
+	ev1.SetID("1234")
+	ev1.SetType("test")
+	ev1.SetSource("test")
+	err = eventlog.Append(context.Background(), ev1)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	ev2 := event.New()
+	ev2.SetID("4321")
+	ev2.SetType("test")
+	ev2.SetSource("test")
+	err = eventlog.Append(context.Background(), ev2)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	numOfEvents := 0
+	err = eventlog.
+		Iterator().
+		Consume(func(e *event.Event) error {
+			numOfEvents += 1
+			return nil
+		})
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	fmt.Println(numOfEvents)
+	// Output: 2
+}
