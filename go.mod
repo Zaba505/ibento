@@ -8,6 +8,7 @@ require (
 	github.com/dgraph-io/badger/v3 v3.2103.5
 	github.com/stretchr/testify v1.8.0
 	go.uber.org/zap v1.10.0
+	golang.org/x/sync v0.0.0-20201020160332-67f06af15bc9
 	google.golang.org/protobuf v1.26.0
 )
 
