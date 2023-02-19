@@ -249,20 +249,24 @@ func BenchmarkLog_Append(b *testing.B) {
 	}
 	defer log.Close()
 
-	ctx := context.Background()
-
 	ev := event.New()
 	ev.SetSource("example")
 	ev.SetID("1")
 	ev.SetType("example")
 
-	for i := 0; i < b.N; i++ {
-		err = log.Append(ctx, ev)
-		if err != nil {
-			b.Error(err)
-			return
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		for pb.Next() {
+			err := log.Append(ctx, ev)
+			if err != nil {
+				b.Error(err)
+				return
+			}
 		}
-	}
+	})
 }
 
 func ExampleLog_Iterator() {

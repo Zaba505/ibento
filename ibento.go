@@ -21,9 +21,10 @@ import (
 
 // Log represents an readonly and append-only log of events
 type Log struct {
-	badger *badger.DB
-	seq    *badger.Sequence
-	log    *zap.Logger
+	badger        *badger.DB
+	seq           *badger.Sequence
+	log           *zap.Logger
+	notifications *queue
 }
 
 type logOptions struct {
@@ -64,9 +65,10 @@ func Open(dir string, opts ...Option) (*Log, error) {
 	}
 
 	l := &Log{
-		badger: db,
-		seq:    seq,
-		log:    defaultOpts.logger,
+		badger:        db,
+		seq:           seq,
+		log:           defaultOpts.logger,
+		notifications: newQueue(),
 	}
 	return l, nil
 }
@@ -74,6 +76,7 @@ func Open(dir string, opts ...Option) (*Log, error) {
 // Close
 func (l *Log) Close() error {
 	l.seq.Release()
+	l.notifications.Close()
 	return l.badger.Close()
 }
 
@@ -125,9 +128,24 @@ func (l *Log) Append(ctx context.Context, ev event.Event) error {
 		return err
 	}
 
-	return l.badger.Update(func(txn *badger.Txn) error {
+	err = l.badger.Update(func(txn *badger.Txn) error {
 		return txn.Set(key[:], value)
 	})
+	if err != nil {
+		l.log.Error("failed to append event to badger", zap.Error(err))
+		return err
+	}
+
+	err = l.notifications.publish(ctx, Notification{
+		EventId:     ev.ID(),
+		EventSource: ev.Source(),
+		EventType:   ev.Type(),
+	})
+	if err != nil {
+		l.log.Warn("failed to publish notification", zap.Error(err))
+	}
+
+	return nil
 }
 
 // Iterator
