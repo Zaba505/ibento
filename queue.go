@@ -42,7 +42,7 @@ func newQueue() *queue {
 		subCh:   make(chan func(map[uint64]*subscription)),
 	}
 
-	go q.run(gctx)
+	q.run(gctx)
 
 	return q
 }
